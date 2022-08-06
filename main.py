@@ -2,9 +2,10 @@ import random
 import time
 import os
 import sys
+import shlex
 
 random.seed(int(time.time()))
-os.system("cls")
+os.system(shlex.quote("cls"))
 
 
 def toHex(num):
@@ -52,34 +53,34 @@ def toBin(num):
     return bin(num)[2:]
 
 
-def toNum(bin):
-    return int(bin, 2)
+def toNum(binary):
+    return int(binary, 2)
 
 
-def obfuscateNumber(num, list):
+def obfuscateNumber(num, lists):
     num = toBin(num)
-    b = list[2]
+    b = lists[2]
     a, c = "", ""
     for i, v in enumerate(num):
-        pick = list[int(num[i])]
+        pick = lists[int(num[i])]
         pick = pick[random.randint(0, len(pick) - 1)]
         a, c = a + pick[0], c + pick[1]
-    return ("%s%s%s" % (toHex(int(toNum(a))), b, toHex(int(toNum(c)))))
+    return (f"{toHex(int(toNum(a)))}{b}{toHex(int(toNum(c)))}")
 
 
-def obfuscateBoolean(bool):
+def obfuscateBoolean(boolean):
     eq = ["==", "!=", ">", "<", ">=", "<="]
     a, c = obfuscateNumber(
-        random.randint(100, 300), 
-        gates[random.randint(0, len(gates) - 1)]), obfuscateNumber(random.randint(100, 300), 
+        random.randint(100, 300),
+        gates[random.randint(0, len(gates) - 1)]), obfuscateNumber(random.randint(100, 300),
         gates[random.randint(0, len(gates) - 1)]
     )
     while True:
         b = eq[random.randint(0, len(eq) - 1)]
-        result = eval("(%s)%s(%s)" % (a, b, c))
-        if result == bool:
+        result = eval(f"({a}){b}({c})")
+        if result == boolean:
             break
-    return ("(%s)%s(%s)" % (a, b, c))
+    return (f"({a}){b}({c})")
 
 
 def obfuscateString(string):
@@ -87,7 +88,7 @@ def obfuscateString(string):
     for i, v in enumerate(string):
         byte = obfuscateNumber(ord(string[i]), gates[random.randint(0, len(gates) - 1)])
         falsebyte = obfuscateNumber(ord(
-            string[i]) + random.randint(-10, 10), 
+            string[i]) + random.randint(-10, 10),
             gates[random.randint(0, len(gates) - 1)]
         )
         boolean = bool(random.randint(0, 1))
