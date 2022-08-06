@@ -10,8 +10,10 @@ os.system("cls")
 def generateRandomString(length=2):
     return "".join([random.choice("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") for i in range(length)])
 
+
 def toHex(num):
     return hex(num)
+
 
 gates = [
     [
