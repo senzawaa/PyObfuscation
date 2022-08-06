@@ -70,10 +70,11 @@ def obfuscateNumber(num, list):
 def obfuscateBoolean(bool):
     eq = ["==", "!=", ">", "<", ">=", "<="]
     a, c = obfuscateNumber(
-        random.randint(100, 300), 
-        gates[random.randint(0, len(gates) - 1)]), obfuscateNumber(random.randint(100, 300), 
-        gates[random.randint(0, len(gates) - 1)]
-    )
+        random.randint(100, 300),
+        gates[random.randint(0, len(gates) - 1)]), obfuscateNumber(random.randint(100, 300),
+                                                                   gates[random.randint(
+                                                                       0, len(gates) - 1)]
+                                                                   )
     while True:
         b = eq[random.randint(0, len(eq) - 1)]
         result = eval("(%s)%s(%s)" % (a, b, c))
@@ -85,9 +86,10 @@ def obfuscateBoolean(bool):
 def obfuscateString(string):
     arr = []
     for i, v in enumerate(string):
-        byte = obfuscateNumber(ord(string[i]), gates[random.randint(0, len(gates) - 1)])
+        byte = obfuscateNumber(
+            ord(string[i]), gates[random.randint(0, len(gates) - 1)])
         falsebyte = obfuscateNumber(ord(
-            string[i]) + random.randint(-10, 10), 
+            string[i]) + random.randint(-10, 10),
             gates[random.randint(0, len(gates) - 1)]
         )
         boolean = bool(random.randint(0, 1))
