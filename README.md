@@ -3,3 +3,6 @@
 
 ##### Usage
 ```python main.py <string>```
+
+##### Example
+```python main.py "Hello World"```
