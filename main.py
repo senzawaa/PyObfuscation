@@ -61,11 +61,11 @@ def obfuscateNumber(num, lists):
     num = toBin(num)
     b = lists[2]
     a, c = "", ""
-    for i, v in enumerate(num):
+    for i, unused in enumerate(num):
         pick = lists[int(num[i])]
         pick = pick[random.randint(0, len(pick) - 1)]
         a, c = a + pick[0], c + pick[1]
-    return (f"{toHex(int(toNum(a)))}{b}{toHex(int(toNum(c)))}")
+    return f"{toHex(int(toNum(a)))}{b}{toHex(int(toNum(c)))}"
 
 
 def obfuscateBoolean(boolean):
@@ -80,12 +80,12 @@ def obfuscateBoolean(boolean):
         result = eval(f"({a}){b}({c})")
         if result == boolean:
             break
-    return (f"({a}){b}({c})")
+    return f"({a}){b}({c})"
 
 
 def obfuscateString(string):
     arr = []
-    for i, v in enumerate(string):
+    for i, unused in enumerate(string):
         byte = obfuscateNumber(ord(string[i]), gates[random.randint(0, len(gates) - 1)])
         falsebyte = obfuscateNumber(ord(
             string[i]) + random.randint(-10, 10),
