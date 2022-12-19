@@ -2,7 +2,6 @@ import random
 import time
 import os
 import sys
-import shlex
 
 random.seed(int(time.time()))
 os.system("cls")
