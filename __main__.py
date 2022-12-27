@@ -2,13 +2,14 @@ import random
 import time
 import os
 import sys
-
 random.seed(int(time.time()))
 os.system("cls")
 
 
+
 def toHex(num):
     return hex(num)
+
 
 
 gates = [
@@ -48,12 +49,15 @@ gates = [
 ]
 
 
+
 def toBin(num):
     return bin(num)[2:]
 
 
+
 def toNum(binary):
     return int(binary, 2)
+
 
 
 def obfuscateNumber(num, lists):
@@ -65,6 +69,7 @@ def obfuscateNumber(num, lists):
         pick = pick[random.randint(0, len(pick) - 1)]
         a, c = a + pick[0], c + pick[1]
     return f"{toHex(int(toNum(a)))}{b}{toHex(int(toNum(c)))}"
+
 
 
 def obfuscateBoolean(boolean):
@@ -83,6 +88,7 @@ def obfuscateBoolean(boolean):
     return f"({a}){b}({c})"
 
 
+
 def obfuscateString(string):
     arr = []
     for i, unused in enumerate(string):
@@ -98,6 +104,7 @@ def obfuscateString(string):
             f"(({obfuscateBoolean(boolean)})and(chr({order[0]}))or(chr({order[1]})))"
         )
     return "+".join(arr)
+
 
 
 data = obfuscateString(sys.argv[1])
