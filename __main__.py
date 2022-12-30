@@ -82,7 +82,6 @@ def obfuscateBoolean(boolean):
     return f"({a}){b}({c})"
 
 
-
 def obfuscateString(string):
     arr = []
     for i, unused in enumerate(string):
