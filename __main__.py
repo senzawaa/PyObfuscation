@@ -104,7 +104,6 @@ def obfuscateBoolean(boolean):
 def obfuscateRuntimeBoolean(boolean):
     return f"(({obfuscateBoolean(boolean)})==({runtimeTrue()}))"
 
-
 def obfuscateString(string):
     arr = []
     for i, unused in enumerate(string):
