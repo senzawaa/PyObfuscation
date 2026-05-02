@@ -1,7 +1,11 @@
 import argparse
 import ast
+import dis
 import io
+import importlib.util
+import marshal
 import random
+import struct
 import time
 import tokenize
 
@@ -271,6 +275,125 @@ class ConstantObfuscator(ast.NodeTransformer):
         return node
 
 
+class ControlFlowObfuscator(ast.NodeTransformer):
+    def visit_Module(self, node):
+        node.body = self.visitModuleBody(node.body)
+        return node
+
+    def visit_FunctionDef(self, node):
+        node.body = self.visitBody(node.body)
+        return node
+
+    def visit_AsyncFunctionDef(self, node):
+        node.body = self.visitBody(node.body)
+        return node
+
+    def visit_ClassDef(self, node):
+        node.body = self.visitBody(node.body)
+        return node
+
+    def visit_If(self, node):
+        node.body = self.visitBody(node.body)
+        node.orelse = self.visitBody(node.orelse)
+        return node
+
+    def visit_For(self, node):
+        node.body = self.visitBody(node.body)
+        node.orelse = self.visitBody(node.orelse)
+        return node
+
+    def visit_AsyncFor(self, node):
+        node.body = self.visitBody(node.body)
+        node.orelse = self.visitBody(node.orelse)
+        return node
+
+    def visit_While(self, node):
+        node.body = self.visitBody(node.body)
+        node.orelse = self.visitBody(node.orelse)
+        return node
+
+    def visit_With(self, node):
+        node.body = self.visitBody(node.body)
+        return node
+
+    def visit_AsyncWith(self, node):
+        node.body = self.visitBody(node.body)
+        return node
+
+    def visit_Try(self, node):
+        node.body = self.visitBody(node.body)
+        node.orelse = self.visitBody(node.orelse)
+        node.finalbody = self.visitBody(node.finalbody)
+        for handler in node.handlers:
+            handler.body = self.visitBody(handler.body)
+        return node
+
+    def visit_Match(self, node):
+        for case in node.cases:
+            case.body = self.visitBody(case.body)
+        return node
+
+    def visitModuleBody(self, body):
+        headerLength = 1 if self.hasDocstring(body) else 0
+        while (
+            headerLength < len(body)
+            and isinstance(body[headerLength], ast.ImportFrom)
+            and body[headerLength].module == "__future__"
+        ):
+            headerLength += 1
+        return body[:headerLength] + self.visitBody(body[headerLength:])
+
+    def visitBody(self, body):
+        visited = []
+        for statement in body:
+            result = self.visit(statement)
+            if isinstance(result, list):
+                visited.extend(result)
+            elif result is not None:
+                visited.append(result)
+        return self.wrapBody(visited)
+
+    def wrapBody(self, body):
+        wrapped = []
+        for statement in body:
+            if self.canWrap(statement):
+                wrapped.append(self.wrapStatement(statement))
+            else:
+                wrapped.append(statement)
+        return wrapped
+
+    def canWrap(self, statement):
+        return not isinstance(statement, (ast.Global, ast.Nonlocal, ast.Pass))
+
+    def wrapStatement(self, statement):
+        realFirst = bool(random.randint(0, 1))
+        test = self.opaqueBoolean(realFirst)
+        decoy = self.deadLoop()
+        body, orelse = ([statement], decoy) if realFirst else (decoy, [statement])
+        wrapper = ast.If(test=test, body=body, orelse=orelse)
+        return ast.copy_location(wrapper, statement)
+
+    def deadLoop(self):
+        return [
+            ast.While(
+                test=self.opaqueBoolean(False),
+                body=[ast.Break()],
+                orelse=[],
+            )
+        ]
+
+    def opaqueBoolean(self, value):
+        return ast.parse(obfuscateRuntimeBoolean(value), mode="eval").body
+
+    def hasDocstring(self, body):
+        return (
+            bool(body)
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        )
+
+
 def minifyPythonWhitespace(code):
     lines = []
     currentLine = []
@@ -419,16 +542,44 @@ def isFStringToken(token):
     return tokenize.tok_name.get(token.type, "").startswith("FSTRING")
 
 
-def obfuscateScript(inputPath, outputPath, aggressive):
+def obfuscateScriptCode(inputPath, aggressive, controlFlow=False):
     with open(inputPath, "r", encoding="utf-8") as source:
         tree = ast.parse(source.read(), filename=inputPath)
 
     tree = ConstantObfuscator(aggressive).visit(tree)
+    if controlFlow:
+        tree = ControlFlowObfuscator().visit(tree)
     ast.fix_missing_locations(tree)
+    return minifyPythonWhitespace(ast.unparse(tree)) + "\n"
 
-    with open(outputPath, "w", encoding="utf-8") as target:
-        target.write(minifyPythonWhitespace(ast.unparse(tree)))
-        target.write("\n")
+
+def obfuscateScript(inputPath, outputPath, aggressive, controlFlow=False):
+    writeTextFile(outputPath, obfuscateScriptCode(inputPath, aggressive, controlFlow))
+
+
+def writeTextFile(path, text):
+    with open(path, "w", encoding="utf-8") as target:
+        target.write(text)
+
+
+def compilePyc(sourceCode, pycPath, sourceName):
+    code = compile(sourceCode, sourceName, "exec")
+    sourceSize = len(sourceCode.encode("utf-8")) & 0xFFFFFFFF
+    timestamp = int(time.time()) & 0xFFFFFFFF
+    header = importlib.util.MAGIC_NUMBER + struct.pack(
+        "<III",
+        0,
+        timestamp,
+        sourceSize,
+    )
+
+    with open(pycPath, "wb") as target:
+        target.write(header)
+        marshal.dump(code, target)
+
+
+def disassembleSource(sourceCode, sourceName, mode="exec"):
+    dis.dis(compile(sourceCode, sourceName, mode))
 
 
 def main():
@@ -438,6 +589,19 @@ def main():
     parser.add_argument("string", nargs="?", help="string to obfuscate")
     parser.add_argument("-i", "--input", help="Python script to obfuscate")
     parser.add_argument("-o", "--output", help="where to write the obfuscated script")
+    parser.add_argument("--pyc", help="where to write compiled .pyc bytecode")
+    parser.add_argument(
+        "--disassemble",
+        action="store_true",
+        help="print Python bytecode disassembly for the generated code",
+    )
+    parser.add_argument(
+        "--control-flow",
+        "--jmp",
+        dest="control_flow",
+        action="store_true",
+        help="wrap source statements in opaque branches to emit jump bytecode",
+    )
     parser.add_argument(
         "-a",
         "--aggressive",
@@ -446,16 +610,29 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.input or args.output:
+    if args.input or args.output or args.pyc or args.control_flow:
         if args.string:
-            parser.error("string mode cannot be combined with --input/--output")
-        if not args.input or not args.output:
-            parser.error("--input and --output must be used together")
-        obfuscateScript(args.input, args.output, args.aggressive)
+            parser.error(
+                "string mode cannot be combined with --input/--output/--pyc/--control-flow"
+            )
+        if not args.input:
+            parser.error("--input is required when using --output, --pyc, or --control-flow")
+        if not args.output and not args.pyc and not args.disassemble:
+            parser.error("use --output, --pyc, or --disassemble with --input")
+
+        sourceCode = obfuscateScriptCode(args.input, args.aggressive, args.control_flow)
+        sourceName = args.output or args.pyc or args.input
+
+        if args.output:
+            writeTextFile(args.output, sourceCode)
+        if args.pyc:
+            compilePyc(sourceCode, args.pyc, sourceName)
+        if args.disassemble:
+            disassembleSource(sourceCode, sourceName)
         return
 
     if args.string is None:
-        parser.error("provide a string or use --input/--output")
+        parser.error("provide a string or use --input with --output, --pyc, or --disassemble")
 
     data = (
         obfuscateAggressiveString(args.string)
@@ -463,6 +640,9 @@ def main():
         else obfuscateString(args.string)
     )
     print(data)
+    if args.disassemble:
+        print()
+        disassembleSource(data, "<obfuscated-string>", mode="eval")
 
 
 if __name__ == "__main__":
