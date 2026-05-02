@@ -144,12 +144,23 @@ def obfuscateAggressiveString(string):
     return "+".join(arr) if arr else "''"
 
 
-class StringConstantObfuscator(ast.NodeTransformer):
+def toBase(num, base):
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    if num == 0:
+        return "0"
+    result = ""
+    while num:
+        num, remainder = divmod(num, base)
+        result = digits[remainder] + result
+    return result
+
+
+class ConstantObfuscator(ast.NodeTransformer):
     def __init__(self, aggressive):
         self.aggressive = aggressive
         super().__init__()
 
-    def obfuscateValue(self, value):
+    def obfuscateStringValue(self, value):
         expression = (
             obfuscateAggressiveString(value)
             if self.aggressive
@@ -157,7 +168,45 @@ class StringConstantObfuscator(ast.NodeTransformer):
         )
         return ast.parse(expression, mode="eval").body
 
+    def obfuscateIntegerValue(self, value):
+        number = abs(value)
+        key = self.randomIntegerKey(number)
+        encoded = number ^ key
+        expression = (
+            f"({self.obfuscateIntegerLiteral(encoded)}"
+            f"^{self.obfuscateIntegerLiteral(key)})"
+        )
+        if self.aggressive:
+            expression = random.choice([
+                f"(({expression})+({runtimeZero()}))",
+                f"(({expression})-({runtimeZero()}))",
+                f"(({expression})^({runtimeZero()}))",
+            ])
+        if value < 0:
+            expression = f"-({expression})"
+        return ast.parse(expression, mode="eval").body
+
+    def randomIntegerKey(self, value):
+        key = random.randint(256, max(4096, value + 4096))
+        while key == value:
+            key = random.randint(256, max(4096, value + 4096))
+        return key
+
+    def obfuscateIntegerLiteral(self, value):
+        base = random.randint(11, 36)
+        while base == value:
+            base = random.randint(11, 36)
+        return f"int('{toBase(value, base)}',{base})"
+
     def visit_JoinedStr(self, node):
+        return node
+
+    def visit_Match(self, node):
+        node.subject = self.visit(node.subject)
+        for case in node.cases:
+            if case.guard:
+                case.guard = self.visit(case.guard)
+            self.generic_visit_body(case.body)
         return node
 
     def visit_Module(self, node):
@@ -215,80 +264,176 @@ class StringConstantObfuscator(ast.NodeTransformer):
         )
 
     def visit_Constant(self, node):
-        if not isinstance(node.value, str):
-            return node
-        return ast.copy_location(self.obfuscateValue(node.value), node)
+        if isinstance(node.value, str):
+            return ast.copy_location(self.obfuscateStringValue(node.value), node)
+        if isinstance(node.value, int) and not isinstance(node.value, bool):
+            return ast.copy_location(self.obfuscateIntegerValue(node.value), node)
+        return node
 
 
-def compactArithmeticWhitespace(code):
-    compactOperators = {
-        "+",
-        "-",
-        "*",
-        "/",
-        "//",
-        "%",
-        "**",
-        "&",
-        "|",
-        "^",
-        "==",
-        "!=",
-        "<",
-        ">",
-        "<=",
-        ">=",
-    }
-    tokens = list(tokenize.generate_tokens(io.StringIO(code).readline))
-    lines = code.splitlines(keepends=True)
-    offsets = [0]
-    for line in lines:
-        offsets.append(offsets[-1] + len(line))
-
-    def offset(position):
-        row, column = position
-        return offsets[row - 1] + column
-
-    def compactWhitespace(value):
-        if "\n" not in value and "\r" not in value:
-            return ""
-        return "\n".join(part.strip(" \t") for part in value.split("\n"))
-
-    result = []
-    lastOffset = 0
-    previousOperator = False
+def minifyPythonWhitespace(code):
+    lines = []
+    currentLine = []
+    indentLevel = 0
+    tokens = tokenize.generate_tokens(io.StringIO(code).readline)
     for token in tokens:
-        if token.type == tokenize.ENDMARKER:
+        if token.type in {tokenize.ENCODING, tokenize.ENDMARKER, tokenize.COMMENT}:
             continue
-        start = offset(token.start)
-        end = offset(token.end)
-        currentOperator = token.type == tokenize.OP and token.string in compactOperators
-        whitespace = code[lastOffset:start]
-        if previousOperator or currentOperator:
-            whitespace = compactWhitespace(whitespace)
-        result.append(whitespace)
-        result.append(token.string)
-        lastOffset = end
-        previousOperator = currentOperator
-    result.append(code[lastOffset:])
-    return "".join(result)
+        if token.type == tokenize.INDENT:
+            indentLevel += 1
+            continue
+        if token.type == tokenize.DEDENT:
+            indentLevel -= 1
+            continue
+        if token.type == tokenize.NL:
+            continue
+        if token.type == tokenize.NEWLINE:
+            if currentLine:
+                lines.append((" " * indentLevel) + minifyTokenLine(currentLine))
+                currentLine = []
+            continue
+        currentLine.append(token)
+
+    if currentLine:
+        lines.append((" " * indentLevel) + minifyTokenLine(currentLine))
+
+    return "\n".join(lines)
+
+
+def minifyTokenLine(tokens):
+    parts = []
+    previous = None
+    for token in tokens:
+        if previous and needsSpaceBetween(previous, token):
+            parts.append(" ")
+        parts.append(token.string)
+        previous = token
+    return "".join(parts)
+
+
+def needsSpaceBetween(previous, current):
+    if isFStringToken(previous) or isFStringToken(current):
+        if previous.string in {
+            "and",
+            "as",
+            "assert",
+            "async",
+            "case",
+            "class",
+            "def",
+            "del",
+            "elif",
+            "except",
+            "for",
+            "from",
+            "global",
+            "if",
+            "import",
+            "in",
+            "is",
+            "lambda",
+            "match",
+            "nonlocal",
+            "not",
+            "or",
+            "raise",
+            "return",
+            "while",
+            "with",
+            "yield",
+        }:
+            return True
+        if current.string in {"and", "as", "else", "for", "if", "in", "is", "or"}:
+            return True
+        if current.type == tokenize.NAME and isFStringToken(previous):
+            return True
+        if previous.type == tokenize.NAME and isFStringToken(current):
+            return True
+        return False
+
+    if isWordLike(previous) and isWordLike(current):
+        if previous.type == tokenize.STRING and current.type == tokenize.STRING:
+            return False
+        return True
+
+    if current.string in {
+        "and",
+        "as",
+        "else",
+        "for",
+        "if",
+        "import",
+        "in",
+        "is",
+        "not",
+        "or",
+    }:
+        return previous.string not in {"(", "[", "{", ",", ":", "=", "->"}
+
+    if previous.string in {
+        "and",
+        "as",
+        "assert",
+        "async",
+        "class",
+        "def",
+        "del",
+        "elif",
+        "except",
+        "for",
+        "from",
+        "global",
+        "if",
+        "import",
+        "in",
+        "is",
+        "lambda",
+        "match",
+        "nonlocal",
+        "or",
+        "raise",
+        "while",
+        "with",
+        "yield",
+    }:
+        return current.string not in {"(", "[", "{", ":", ",", ")"}
+
+    if previous.string in {"return", "not", "await"}:
+        return isWordLike(current)
+
+    if previous.string == "from":
+        return True
+
+    return False
+
+
+def isWordLike(token):
+    tokenName = tokenize.tok_name.get(token.type, "")
+    return (
+        token.type in {tokenize.NAME, tokenize.NUMBER, tokenize.STRING}
+        or tokenName.startswith("FSTRING")
+    )
+
+
+def isFStringToken(token):
+    return tokenize.tok_name.get(token.type, "").startswith("FSTRING")
 
 
 def obfuscateScript(inputPath, outputPath, aggressive):
     with open(inputPath, "r", encoding="utf-8") as source:
         tree = ast.parse(source.read(), filename=inputPath)
 
-    tree = StringConstantObfuscator(aggressive).visit(tree)
+    tree = ConstantObfuscator(aggressive).visit(tree)
     ast.fix_missing_locations(tree)
 
     with open(outputPath, "w", encoding="utf-8") as target:
-        target.write(compactArithmeticWhitespace(ast.unparse(tree)))
+        target.write(minifyPythonWhitespace(ast.unparse(tree)))
         target.write("\n")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Obfuscate strings or Python script string constants."
+        description="Obfuscate strings or Python script constants."
     )
     parser.add_argument("string", nargs="?", help="string to obfuscate")
     parser.add_argument("-i", "--input", help="Python script to obfuscate")

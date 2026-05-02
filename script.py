@@ -4,7 +4,7 @@ APP_NAME = "PyObfuscation"
 EMPTY_TEXT = ""
 UNICODE_TEXT = "สวัสดี"
 
-
+number = 10
 def greet(name="World"):
     """Return a greeting for script obfuscation tests."""
     message = "Hello"
