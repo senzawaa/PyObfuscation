@@ -10,6 +10,9 @@
 ##### Script mode
 ```python3 . -i script.py -o out.py```
 
+Script mode strips comments/docstrings and obfuscates constants, module
+globals, builtin function calls, and local variable names.
+
 ##### Compile obfuscated script to .pyc
 ```python3 . -i script.py -o out.py --pyc out.pyc```
 
@@ -17,12 +20,8 @@ Run the bytecode with the same Python version:
 ```python3 out.pyc```
 
 ##### Add source-level jump/control-flow obfuscation
-```python3 . -i script.py -o out.py --pyc out.pyc --control-flow```
+```python3 . -i script.py -o out.py --control-flow```
 
-##### Inspect Python bytecode assembly
-```python3 . -i script.py --control-flow --disassemble```
-
-Python bytecode is CPython's stack-machine instruction format. The
-`--disassemble` option prints the `dis` module view of the generated code.
-With `--control-flow`, the generated source contains opaque `if` and `while`
-blocks that compile into jump instructions.
+The `--control-flow` option rewrites the Python AST so normal statements are
+executed through shuffled state-machine loops while preserving runtime
+behavior.

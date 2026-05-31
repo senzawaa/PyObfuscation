@@ -1,5 +1,6 @@
 import argparse
 import ast
+import builtins
 import dis
 import io
 import importlib.util
@@ -10,6 +11,14 @@ import time
 import tokenize
 
 random.seed(int(time.time()))
+
+BUILTIN_GLOBAL_NAMES = {
+    name
+    for name in dir(builtins)
+    if name.isidentifier()
+    and not name.startswith("__")
+    and callable(getattr(builtins, name))
+}
 
 
 def toHex(num):
@@ -159,6 +168,45 @@ def toBase(num, base):
     return result
 
 
+def randomConfusingName():
+    return f"_0x{random.getrandbits(64):016x}"
+
+
+class DocstringStripper(ast.NodeTransformer):
+    def visit_Module(self, node):
+        node.body = self.stripBody(node.body)
+        self.generic_visit(node)
+        return node
+
+    def visit_FunctionDef(self, node):
+        node.body = self.stripBody(node.body)
+        self.generic_visit(node)
+        return node
+
+    def visit_AsyncFunctionDef(self, node):
+        node.body = self.stripBody(node.body)
+        self.generic_visit(node)
+        return node
+
+    def visit_ClassDef(self, node):
+        node.body = self.stripBody(node.body)
+        self.generic_visit(node)
+        return node
+
+    def stripBody(self, body):
+        if self.hasDocstring(body):
+            body = body[1:]
+        return body or [ast.Pass()]
+
+    def hasDocstring(self, body):
+        return (
+            bool(body)
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        )
+
+
 class ConstantObfuscator(ast.NodeTransformer):
     def __init__(self, aggressive):
         self.aggressive = aggressive
@@ -275,21 +323,439 @@ class ConstantObfuscator(ast.NodeTransformer):
         return node
 
 
+class ModuleGlobalCollector(ast.NodeVisitor):
+    def __init__(self):
+        self.names = set()
+
+    def collect(self, body):
+        for statement in body:
+            self.visit(statement)
+        return self.names
+
+    def visit_FunctionDef(self, node):
+        self.names.add(node.name)
+
+    def visit_AsyncFunctionDef(self, node):
+        self.names.add(node.name)
+
+    def visit_ClassDef(self, node):
+        self.names.add(node.name)
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            self.names.add(alias.asname or alias.name.split(".")[0])
+
+    def visit_ImportFrom(self, node):
+        for alias in node.names:
+            if alias.name != "*":
+                self.names.add(alias.asname or alias.name)
+
+    def visit_Name(self, node):
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self.names.add(node.id)
+
+    def visit_ListComp(self, node):
+        return
+
+    def visit_SetComp(self, node):
+        return
+
+    def visit_DictComp(self, node):
+        return
+
+    def visit_GeneratorExp(self, node):
+        return
+
+    def visit_Lambda(self, node):
+        return
+
+
+class FunctionLocalCollector(ast.NodeVisitor):
+    def __init__(self):
+        self.names = set()
+        self.globalNames = set()
+        self.nonlocalNames = set()
+
+    def collect(self, node):
+        self.collectArguments(node.args)
+        for statement in node.body:
+            self.visit(statement)
+        return self.names - self.globalNames - self.nonlocalNames
+
+    def collectArguments(self, args):
+        for arg in (
+            args.posonlyargs
+            + args.args
+            + args.kwonlyargs
+        ):
+            self.names.add(arg.arg)
+        if args.vararg:
+            self.names.add(args.vararg.arg)
+        if args.kwarg:
+            self.names.add(args.kwarg.arg)
+
+    def visit_Global(self, node):
+        self.globalNames.update(node.names)
+
+    def visit_Nonlocal(self, node):
+        self.nonlocalNames.update(node.names)
+
+    def visit_FunctionDef(self, node):
+        self.names.add(node.name)
+
+    def visit_AsyncFunctionDef(self, node):
+        self.names.add(node.name)
+
+    def visit_ClassDef(self, node):
+        self.names.add(node.name)
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            self.names.add(alias.asname or alias.name.split(".")[0])
+
+    def visit_ImportFrom(self, node):
+        for alias in node.names:
+            if alias.name != "*":
+                self.names.add(alias.asname or alias.name)
+
+    def visit_ExceptHandler(self, node):
+        if node.name:
+            self.names.add(node.name)
+        for statement in node.body:
+            self.visit(statement)
+
+    def visit_Name(self, node):
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self.names.add(node.id)
+
+    def visit_ListComp(self, node):
+        return
+
+    def visit_SetComp(self, node):
+        return
+
+    def visit_DictComp(self, node):
+        return
+
+    def visit_GeneratorExp(self, node):
+        return
+
+    def visit_Lambda(self, node):
+        return
+
+
+class NameObfuscator(ast.NodeTransformer):
+    def __init__(self):
+        self.moduleGlobals = set()
+        self.globalAlias = None
+        self.builtinAlias = None
+        self.localScopes = []
+        self.classDepth = 0
+        self.usedNames = set()
+        super().__init__()
+
+    def visit_Module(self, node):
+        self.moduleGlobals = ModuleGlobalCollector().collect(node.body)
+        self.usedNames = set(self.moduleGlobals)
+        self.builtinAlias = self.uniqueName()
+        if self.moduleGlobals:
+            self.globalAlias = self.uniqueName()
+
+        headerLength = self.moduleHeaderLength(node.body)
+        header = node.body[:headerLength]
+        body = self.visitStatementList(node.body[headerLength:])
+        if self.globalAlias:
+            body.insert(0, self.globalAliasAssignment())
+        if self.builtinAlias:
+            body.insert(0, self.builtinAliasAssignment())
+        node.body = header + body
+        return node
+
+    def moduleHeaderLength(self, body):
+        headerLength = 1 if self.hasDocstring(body) else 0
+        while (
+            headerLength < len(body)
+            and isinstance(body[headerLength], ast.ImportFrom)
+            and body[headerLength].module == "__future__"
+        ):
+            headerLength += 1
+        return headerLength
+
+    def visitStatementList(self, body):
+        result = []
+        for statement in body:
+            transformed = self.visit(statement)
+            if isinstance(transformed, list):
+                result.extend(transformed)
+            elif transformed is not None:
+                result.append(transformed)
+        return result
+
+    def visit_FunctionDef(self, node):
+        if self.isModuleScope():
+            return self.visitModuleFunction(node)
+        self.renameLocalBinding(node)
+        self.visitFunctionOuterParts(node)
+        self.visitFunctionBody(node)
+        return node
+
+    def visit_AsyncFunctionDef(self, node):
+        if self.isModuleScope():
+            return self.visitModuleFunction(node)
+        self.renameLocalBinding(node)
+        self.visitFunctionOuterParts(node)
+        self.visitFunctionBody(node)
+        return node
+
+    def visitModuleFunction(self, node):
+        originalName = node.name
+        temporaryName = self.uniqueName()
+        node.name = temporaryName
+        self.visitFunctionOuterParts(node)
+        self.visitFunctionBody(node)
+        return [
+            node,
+            self.exportGlobal(originalName, temporaryName),
+            self.deleteName(temporaryName),
+        ]
+
+    def visitFunctionOuterParts(self, node):
+        node.decorator_list = [self.visit(item) for item in node.decorator_list]
+        self.visitArgumentOuterParts(node.args)
+        if node.returns:
+            node.returns = self.visit(node.returns)
+
+    def visitArgumentOuterParts(self, args):
+        for defaultIndex, default in enumerate(args.defaults):
+            args.defaults[defaultIndex] = self.visit(default)
+        for defaultIndex, default in enumerate(args.kw_defaults):
+            if default is not None:
+                args.kw_defaults[defaultIndex] = self.visit(default)
+        for arg in self.iterArguments(args):
+            if arg.annotation:
+                arg.annotation = self.visit(arg.annotation)
+
+    def visitFunctionBody(self, node):
+        localMap = self.localRenameMap(node)
+        self.renameArguments(node.args, localMap)
+        self.localScopes.append(localMap)
+        node.body = self.visitStatementList(node.body)
+        self.localScopes.pop()
+
+    def localRenameMap(self, node):
+        return {
+            name: self.uniqueName()
+            for name in sorted(FunctionLocalCollector().collect(node))
+        }
+
+    def renameArguments(self, args, localMap):
+        for arg in self.iterArguments(args):
+            if arg.arg in localMap:
+                arg.arg = localMap[arg.arg]
+
+    def iterArguments(self, args):
+        arguments = args.posonlyargs + args.args + args.kwonlyargs
+        if args.vararg:
+            arguments.append(args.vararg)
+        if args.kwarg:
+            arguments.append(args.kwarg)
+        return arguments
+
+    def visit_ClassDef(self, node):
+        if self.isModuleScope():
+            return self.visitModuleClass(node)
+        self.renameLocalBinding(node)
+        self.visitClassOuterParts(node)
+        return node
+
+    def visitModuleClass(self, node):
+        originalName = node.name
+        temporaryName = self.uniqueName()
+        node.name = temporaryName
+        self.visitClassOuterParts(node)
+        return [
+            node,
+            self.exportGlobal(originalName, temporaryName),
+            self.deleteName(temporaryName),
+        ]
+
+    def visitClassOuterParts(self, node):
+        node.decorator_list = [self.visit(item) for item in node.decorator_list]
+        node.bases = [self.visit(item) for item in node.bases]
+        node.keywords = [self.visit(item) for item in node.keywords]
+
+    def visit_Import(self, node):
+        if self.localScopes:
+            for alias in node.names:
+                boundName = alias.asname or alias.name.split(".")[0]
+                localName = self.lookupLocal(boundName)
+                if localName:
+                    alias.asname = localName
+        return node
+
+    def visit_ImportFrom(self, node):
+        if self.localScopes:
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                boundName = alias.asname or alias.name
+                localName = self.lookupLocal(boundName)
+                if localName:
+                    alias.asname = localName
+        return node
+
+    def visit_ExceptHandler(self, node):
+        if node.type:
+            node.type = self.visit(node.type)
+        if node.name:
+            localName = self.lookupLocal(node.name)
+            if localName:
+                node.name = localName
+        node.body = self.visitStatementList(node.body)
+        return node
+
+    def visit_Nonlocal(self, node):
+        node.names = [self.lookupOuterLocal(name) or name for name in node.names]
+        return node
+
+    def visit_ListComp(self, node):
+        return node
+
+    def visit_SetComp(self, node):
+        return node
+
+    def visit_DictComp(self, node):
+        return node
+
+    def visit_GeneratorExp(self, node):
+        return node
+
+    def visit_Lambda(self, node):
+        return node
+
+    def visit_Name(self, node):
+        localName = self.lookupLocal(node.id)
+        if localName:
+            return ast.copy_location(ast.Name(id=localName, ctx=node.ctx), node)
+        if self.globalAlias and node.id in self.moduleGlobals:
+            return ast.copy_location(self.globalAccess(node.id, node.ctx), node)
+        if (
+            self.builtinAlias
+            and isinstance(node.ctx, ast.Load)
+            and node.id in BUILTIN_GLOBAL_NAMES
+        ):
+            return ast.copy_location(self.builtinAccess(node.id, node.ctx), node)
+        return node
+
+    def renameLocalBinding(self, node):
+        localName = self.lookupLocal(node.name)
+        if localName:
+            node.name = localName
+
+    def isModuleScope(self):
+        return not self.localScopes and self.classDepth == 0
+
+    def lookupLocal(self, name):
+        for scope in reversed(self.localScopes):
+            if name in scope:
+                return scope[name]
+        return None
+
+    def lookupOuterLocal(self, name):
+        for scope in reversed(self.localScopes[:-1]):
+            if name in scope:
+                return scope[name]
+        return None
+
+    def globalAccess(self, name, context):
+        return ast.Subscript(
+            value=ast.Call(
+                func=ast.Name(id=self.globalAlias, ctx=ast.Load()),
+                args=[],
+                keywords=[],
+            ),
+            slice=ast.Constant(value=name),
+            ctx=context,
+        )
+
+    def builtinAccess(self, name, context):
+        return ast.Subscript(
+            value=ast.Name(id=self.builtinAlias, ctx=ast.Load()),
+            slice=ast.Constant(value=name),
+            ctx=context,
+        )
+
+    def exportGlobal(self, originalName, temporaryName):
+        return ast.Assign(
+            targets=[self.globalAccess(originalName, ast.Store())],
+            value=ast.Name(id=temporaryName, ctx=ast.Load()),
+        )
+
+    def deleteName(self, name):
+        return ast.Delete(targets=[ast.Name(id=name, ctx=ast.Del())])
+
+    def globalAliasAssignment(self):
+        return ast.Assign(
+            targets=[ast.Name(id=self.globalAlias, ctx=ast.Store())],
+            value=self.builtinAccess("globals", ast.Load()),
+        )
+
+    def builtinAliasAssignment(self):
+        return ast.Assign(
+            targets=[ast.Name(id=self.builtinAlias, ctx=ast.Store())],
+            value=ast.IfExp(
+                test=ast.Call(
+                    func=ast.Name(id="hasattr", ctx=ast.Load()),
+                    args=[
+                        ast.Name(id="__builtins__", ctx=ast.Load()),
+                        ast.Constant(value="__dict__"),
+                    ],
+                    keywords=[],
+                ),
+                body=ast.Attribute(
+                    value=ast.Name(id="__builtins__", ctx=ast.Load()),
+                    attr="__dict__",
+                    ctx=ast.Load(),
+                ),
+                orelse=ast.Name(id="__builtins__", ctx=ast.Load()),
+            ),
+        )
+
+    def uniqueName(self):
+        name = randomConfusingName()
+        while name in self.usedNames:
+            name = randomConfusingName()
+        self.usedNames.add(name)
+        return name
+
+    def hasDocstring(self, body):
+        return (
+            bool(body)
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        )
+
+
 class ControlFlowObfuscator(ast.NodeTransformer):
+    def __init__(self, aggressive=False):
+        self.integerObfuscator = ConstantObfuscator(aggressive)
+        super().__init__()
+
     def visit_Module(self, node):
         node.body = self.visitModuleBody(node.body)
         return node
 
     def visit_FunctionDef(self, node):
-        node.body = self.visitBody(node.body)
+        node.body = self.visitBody(node.body, preserveDocstring=True)
         return node
 
     def visit_AsyncFunctionDef(self, node):
-        node.body = self.visitBody(node.body)
+        node.body = self.visitBody(node.body, preserveDocstring=True)
         return node
 
     def visit_ClassDef(self, node):
-        node.body = self.visitBody(node.body)
+        node.body = self.visitBody(node.body, preserveDocstring=True)
         return node
 
     def visit_If(self, node):
@@ -343,7 +809,15 @@ class ControlFlowObfuscator(ast.NodeTransformer):
             headerLength += 1
         return body[:headerLength] + self.visitBody(body[headerLength:])
 
-    def visitBody(self, body):
+    def visitBody(self, body, preserveDocstring=False):
+        headerLength = 1 if preserveDocstring and self.hasDocstring(body) else 0
+        while (
+            headerLength < len(body)
+            and isinstance(body[headerLength], (ast.Global, ast.Nonlocal))
+        ):
+            headerLength += 1
+        header = body[:headerLength]
+        body = body[headerLength:]
         visited = []
         for statement in body:
             result = self.visit(statement)
@@ -351,39 +825,110 @@ class ControlFlowObfuscator(ast.NodeTransformer):
                 visited.extend(result)
             elif result is not None:
                 visited.append(result)
-        return self.wrapBody(visited)
+        return header + self.flattenBody(visited)
 
-    def wrapBody(self, body):
-        wrapped = []
-        for statement in body:
-            if self.canWrap(statement):
-                wrapped.append(self.wrapStatement(statement))
+    def flattenBody(self, body):
+        if not body or not self.canFlatten(body):
+            return body
+
+        stateName = self.randomStateName()
+        states = self.randomStates(len(body))
+        cases = []
+        for i, statement in enumerate(body):
+            caseBody = [statement]
+            if i + 1 < len(body):
+                caseBody.append(self.assignState(stateName, states[i + 1]))
             else:
-                wrapped.append(statement)
-        return wrapped
+                caseBody.append(ast.Break())
+            cases.append((states[i], caseBody))
 
-    def canWrap(self, statement):
-        return not isinstance(statement, (ast.Global, ast.Nonlocal, ast.Pass))
+        cases.extend(self.decoyCases(stateName, states))
+        random.shuffle(cases)
 
-    def wrapStatement(self, statement):
-        realFirst = bool(random.randint(0, 1))
-        test = self.opaqueBoolean(realFirst)
-        decoy = self.deadLoop()
-        body, orelse = ([statement], decoy) if realFirst else (decoy, [statement])
-        wrapper = ast.If(test=test, body=body, orelse=orelse)
-        return ast.copy_location(wrapper, statement)
-
-    def deadLoop(self):
         return [
+            self.assignState(stateName, states[0]),
             ast.While(
-                test=self.opaqueBoolean(False),
-                body=[ast.Break()],
+                test=self.opaqueBoolean(True),
+                body=[self.caseChain(stateName, cases)],
                 orelse=[],
-            )
+            ),
+            self.deleteState(stateName),
         ]
+
+    def canFlatten(self, body):
+        if any(
+            isinstance(statement, (ast.Global, ast.Nonlocal, ast.Pass))
+            for statement in body
+        ):
+            return False
+        return not self.hasFreeLoopControl(body)
+
+    def hasFreeLoopControl(self, body):
+        finder = FreeLoopControlFinder()
+        for statement in body:
+            finder.visit(statement)
+            if finder.found:
+                return True
+        return False
+
+    def randomStateName(self):
+        return randomConfusingName()
+
+    def randomStates(self, count):
+        states = set()
+        while len(states) < count:
+            states.add(random.randint(100000, 999999999))
+        return list(states)
+
+    def assignState(self, stateName, value):
+        return ast.Assign(
+            targets=[ast.Name(id=stateName, ctx=ast.Store())],
+            value=self.obfuscatedInteger(value),
+        )
+
+    def deleteState(self, stateName):
+        return ast.Delete(targets=[ast.Name(id=stateName, ctx=ast.Del())])
+
+    def decoyCases(self, stateName, realStates):
+        decoys = []
+        for _ in range(random.randint(1, max(1, min(3, len(realStates))))):
+            decoyState = random.randint(100000, 999999999)
+            while decoyState in realStates:
+                decoyState = random.randint(100000, 999999999)
+            decoys.append((
+                decoyState,
+                [
+                    ast.If(
+                        test=self.opaqueBoolean(False),
+                        body=[self.assignState(stateName, random.choice(realStates))],
+                        orelse=[ast.Pass()],
+                    ),
+                    ast.Break(),
+                ],
+            ))
+        return decoys
+
+    def caseChain(self, stateName, cases):
+        orelse = [ast.Break()]
+        for state, body in reversed(cases):
+            orelse = [
+                ast.If(
+                    test=ast.Compare(
+                        left=ast.Name(id=stateName, ctx=ast.Load()),
+                        ops=[ast.Eq()],
+                        comparators=[self.obfuscatedInteger(state)],
+                    ),
+                    body=body,
+                    orelse=orelse,
+                )
+            ]
+        return orelse[0]
 
     def opaqueBoolean(self, value):
         return ast.parse(obfuscateRuntimeBoolean(value), mode="eval").body
+
+    def obfuscatedInteger(self, value):
+        return self.integerObfuscator.obfuscateIntegerValue(value)
 
     def hasDocstring(self, body):
         return (
@@ -392,6 +937,38 @@ class ControlFlowObfuscator(ast.NodeTransformer):
             and isinstance(body[0].value, ast.Constant)
             and isinstance(body[0].value.value, str)
         )
+
+
+class FreeLoopControlFinder(ast.NodeVisitor):
+    def __init__(self):
+        self.found = False
+
+    def visit_Break(self, node):
+        self.found = True
+
+    def visit_Continue(self, node):
+        self.found = True
+
+    def visit_FunctionDef(self, node):
+        return
+
+    def visit_AsyncFunctionDef(self, node):
+        return
+
+    def visit_ClassDef(self, node):
+        return
+
+    def visit_For(self, node):
+        for statement in node.orelse:
+            self.visit(statement)
+
+    def visit_AsyncFor(self, node):
+        for statement in node.orelse:
+            self.visit(statement)
+
+    def visit_While(self, node):
+        for statement in node.orelse:
+            self.visit(statement)
 
 
 def minifyPythonWhitespace(code):
@@ -546,9 +1123,11 @@ def obfuscateScriptCode(inputPath, aggressive, controlFlow=False):
     with open(inputPath, "r", encoding="utf-8") as source:
         tree = ast.parse(source.read(), filename=inputPath)
 
+    tree = DocstringStripper().visit(tree)
+    tree = NameObfuscator().visit(tree)
     tree = ConstantObfuscator(aggressive).visit(tree)
     if controlFlow:
-        tree = ControlFlowObfuscator().visit(tree)
+        tree = ControlFlowObfuscator(aggressive).visit(tree)
     ast.fix_missing_locations(tree)
     return minifyPythonWhitespace(ast.unparse(tree)) + "\n"
 
@@ -600,7 +1179,7 @@ def main():
         "--jmp",
         dest="control_flow",
         action="store_true",
-        help="wrap source statements in opaque branches to emit jump bytecode",
+        help="flatten source bodies into shuffled state-machine loops",
     )
     parser.add_argument(
         "-a",
